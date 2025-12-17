@@ -24,7 +24,7 @@ CURRENCY_CODES = {
     "CNY": "R01375"
 }
 BASE_URL = "бот"
-TOKEN = "8418519970:AAGt8FPMij2SVKUGwikoI4he3VgcKnwJ76U" 
+TOKEN = "нельзя такое на гит" 
 
 # === Функции получения данных ===
 
@@ -158,4 +158,5 @@ def main() -> None:
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
+
     main()
