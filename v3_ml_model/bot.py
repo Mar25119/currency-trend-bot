@@ -1,25 +1,26 @@
+# v3_ml_model/bot.py
 import io
 import logging
 import numpy as np
 from datetime import datetime, timedelta
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
-from model import predict_trend
+from model import predict_trend, get_advice
 from plotter import plot_trend
 from data_loader import get_all_currencies, get_rates_range
-from feature_engineer import compute_rsi 
+from feature_engineer import compute_rsi
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = "токен"  
+TOKEN = "token"  # ← замените при необходимости
 
 
 def get_kb():
     return ReplyKeyboardMarkup(
-        [["/predict USD 7", "/list"], ["/how", "/help"]],
+        [["/predict USD 7", "/advice USD"], ["/how", "/clear", "/help"]],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -28,28 +29,30 @@ def get_kb():
 # === Команды ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "📈 Бот прогнозирования тренда валют (v3.5)\n"
-        "• Единая ML-модель (RandomForest + калибровка)\n"
-        "• Поддержка всех валют из ЦБ РФ\n"
-        "• График + RSI + волатильность\n\n"
+        "📈 Бот прогнозирования тренда валют (v3.0)\n"
+        "• Единая ML-модель для всех валют\n"
+        "• Аналитика: курс, RSI, волатильность\n"
+        "• Советы и объяснимость\n\n"
         "Доступные команды:\n"
-        "• /predict USD 7\n"
-        "• /list — список валют\n"
-        "• /how — как считается прогноз?",
+        "• /predict USD 7 — прогноз + график\n"
+        "• /advice USD — аналитический совет\n"
+        "• /how — как считается?\n"
+        "• /clear — очистить сообщения",
         reply_markup=get_kb(),
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "📘 Справка (v3.5):\n"
+        "📘 Справка (v3.0):\n"
         "🔹 /predict <код> [N]\n"
         "   Примеры:\n"
-        "   /predict USD        → 7 дней + ML-прогноз\n"
-        "   /predict GBP 10     → график фунта за 10 дней\n"
+        "   /predict USD        → 7 дней + ML + график\n"
+        "   /predict GBP 10     → график за 10 дней\n"
         "   /predict CHF 01.12–18.12 → период\n\n"
-        "🔹 /list — список валют\n"
-        "🔹 /how — как работает расчёт?\n\n"
+        "🔹 /advice USD — совет по валюте\n"
+        "🔹 /how — как работает расчёт?\n"
+        "🔹 /clear — очистить последние сообщения бота\n\n"
         "ℹ️ Все данные — от ЦБ РФ. Прогнозы — аналитические."
     )
     await update.message.reply_text(text, reply_markup=get_kb())
@@ -64,7 +67,7 @@ async def how_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "   • Среднее изменение за 5 дней,\n"
         "   • Волатильность (std изменений),\n"
         "   • RSI(5) — индекс силы тренда.\n"
-        "🔹 *Модель*: Random Forest + калибровка вероятностей (Isotonic).\n"
+        "🔹 *Модель*: Random Forest + калибровка вероятностей.\n"
         "🔹 *Уверенность*:\n"
         "   • >60% → «чёткий сигнал»,\n"
         "   • 40–60% → «неопределённо»,\n"
@@ -73,6 +76,34 @@ async def how_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "⚠️ Это аналитический инструмент, а не финансовый совет."
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_kb())
+
+
+async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        n = int(context.args[0]) if context.args else 3
+        n = min(max(n, 1), 10)
+    except:
+        n = 3
+
+    deleted = 0
+    msg_id = update.message.message_id
+
+    for i in range(1, n + 1):
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id, message_id=msg_id - i
+            )
+            deleted += 1
+        except Exception:
+            continue
+
+    confirm = await update.message.reply_text(f"🗑️ Удалено {deleted} сообщений.")
+    await context.bot.delete_message(
+        chat_id=update.effective_chat.id, message_id=update.message.message_id
+    )
+    await context.bot.delete_message(
+        chat_id=update.effective_chat.id, message_id=confirm.message_id, timeout=2.0
+    )
 
 
 async def list_currencies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -89,6 +120,33 @@ async def list_currencies(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"{left.ljust(max_len)}   {right}")
     text = "💰 Доступные валюты (ЦБ РФ):\n" + "\n".join(lines)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_kb())
+
+
+async def advice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    if not args:
+        await update.message.reply_text("📌 Укажите валюту: /advice USD")
+        return
+
+    curr = args[0].upper()
+    currencies = get_all_currencies()
+    if curr not in currencies:
+        await update.message.reply_text(
+            f"❌ Валюта `{curr}` не найдена. См. /list.", parse_mode="Markdown"
+        )
+        return
+
+    advice = get_advice(curr)
+    if not advice:
+        await update.message.reply_text(f"⚠️ Не удалось сформировать совет для {curr}.")
+        return
+
+    text = (
+        f"💡 *Аналитический совет по {curr}*:\n\n"
+        f"{advice}\n\n"
+        "⚠️ Это не финансовый совет. Информация носит ознакомительный характер."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -113,7 +171,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # === 📊 Расширенная статистика (для всех валют) ===
+    # === 📊 Расширенная аналитика ===
     try:
         end = datetime.now()
         start = end - timedelta(days=20)
@@ -122,12 +180,10 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             rates = [r for _, r in full_data]
             dates = [d for d, _ in full_data]
 
-            # Изменения
             d1 = (rates[-1] - rates[-2]) / rates[-2] * 100 if len(rates) >= 2 else 0.0
             d3 = (rates[-1] - rates[-3]) / rates[-3] * 100 if len(rates) >= 3 else 0.0
             d7 = (rates[-1] - rates[-7]) / rates[-7] * 100 if len(rates) >= 7 else 0.0
 
-            # Волатильность (за 7 дней)
             changes_7 = [
                 (rates[i] - rates[i - 1]) / rates[i - 1]
                 for i in range(max(1, len(rates) - 7), len(rates))
@@ -137,7 +193,6 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "низкая" if vol_7 < 0.5 else "средняя" if vol_7 < 1.2 else "высокая"
             )
 
-            # RSI
             rsi = compute_rsi(rates[-6:], period=5)
             rsi_status = (
                 "перекупленность"
@@ -158,7 +213,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.warning(f"Не удалось собрать статистику для {curr}: {e}")
 
-    # === ✅ ML-прогноз (единая модель для всех валют) ===
+    # === ✅ ML-прогноз (единая модель) ===
     res = predict_trend(curr)
     if res:
         if res["trend"] == "неопределённо":
@@ -175,7 +230,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(f"⚠️ Не удалось получить ML-прогноз для {curr}.")
 
-    # === 📈 График — для любой валюты ===
+    # === 📈 График ===
     img_bytes = plot_trend(curr, date_arg)
     if img_bytes:
         caption = f"📊 {curr}/RUB"
@@ -198,9 +253,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("how", how_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("list", list_currencies))
+    app.add_handler(CommandHandler("advice", advice_cmd))
     app.add_handler(CommandHandler("predict", predict))
-    logger.info("✅ v3.5 запущен: аналитика + /how + единая ML-модель")
+    logger.info("✅ v3.0 запущен: аналитика + ML + советы + очистка")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
